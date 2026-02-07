@@ -239,22 +239,23 @@ st.sidebar.download_button(
 
 # 【關鍵修正】加上這個裝飾器，讓數據被「快取」住，不會每次刷新都亂跳
 # ttl=3600 代表這筆歷史資料會被鎖定 3600 秒 (1小時)，期間內怎麼刷都不會變
-@st.cache_data(ttl=3600, show_spinner=False)
+# 【修正】移除 ttl 快取，改用「智慧鎖定」邏輯，讓時間能動，但曲線不亂跳
 def generate_full_trend(current_val):
-    # 為了讓每次快取結果一致，我們把「現在時間」固定在「整點」
-    # 這樣同一個小時內，圖表的時間軸才不會一直微幅跳動
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    # 1. 獲取現在的精確時間 (包含分鐘)，但秒數歸零比較整齊
+    now = datetime.now().replace(second=0, microsecond=0)
     
     past_hours = 24
     past_time = [now - timedelta(hours=i) for i in range(past_hours, -1, -1)]
     
-    # 1. AQI 列表初始化
+    # 2. AQI 列表初始化
     past_vals = [current_val]
     
-    # 2. 鎖定隨機種子 (Seed)
-    # 這是雙重保險：利用當前的小時數當作種子
-    # 只要是同一個小時、同一個 AQI 值，算出來的「隨機」歷史就會一模一樣
-    np.random.seed(int(now.timestamp()) + current_val)
+    # 【關鍵技術】智慧鎖定種子 (Smart Seeding)
+    # 我們用「現在的小時」+「當前AQI值」當作亂數種子
+    # 效果：在 17:00~17:59 之間，只要 AQI 沒變，歷史曲線的「形狀」就不會變
+    # 但 X 軸的時間標籤 (17:15, 17:20...) 可以自由移動！
+    seed_value = int(now.year + now.month + now.day + now.hour + current_val)
+    np.random.seed(seed_value)
     
     # 3. 溫濕度列表初始化
     current_hour_idx = now.hour
