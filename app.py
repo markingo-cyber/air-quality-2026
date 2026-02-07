@@ -237,9 +237,7 @@ st.sidebar.download_button(
     mime="text/plain"
 )
 
-# 【關鍵修正】加上這個裝飾器，讓數據被「快取」住，不會每次刷新都亂跳
-# ttl=3600 代表這筆歷史資料會被鎖定 3600 秒 (1小時)，期間內怎麼刷都不會變
-# 【修正】移除 ttl 快取，改用「智慧鎖定」邏輯，讓時間能動，但曲線不亂跳
+# 趨勢圖生成函式 (過去24h, 未來8h)
 def generate_full_trend(current_val):
     # 1. 獲取現在的精確時間 (包含分鐘)，但秒數歸零比較整齊
     now = datetime.now().replace(second=0, microsecond=0)
@@ -250,10 +248,8 @@ def generate_full_trend(current_val):
     # 2. AQI 列表初始化
     past_vals = [current_val]
     
-    # 【關鍵技術】智慧鎖定種子 (Smart Seeding)
-    # 我們用「現在的小時」+「當前AQI值」當作亂數種子
-    # 效果：在 17:00~17:59 之間，只要 AQI 沒變，歷史曲線的「形狀」就不會變
-    # 但 X 軸的時間標籤 (17:15, 17:20...) 可以自由移動！
+    # 【智慧鎖定種子】
+    # 讓曲線形狀在同一小時內固定，但 X 軸時間可以隨每分鐘更新
     seed_value = int(now.year + now.month + now.day + now.hour + current_val)
     np.random.seed(seed_value)
     
@@ -291,8 +287,8 @@ def generate_full_trend(current_val):
         h = base_h + np.random.normal(0, 2)
         past_humid.insert(0, int(h))
 
-    # 未來預測
-    future_hours = 4
+    # --- 未來預測 (這裡改成 8 小時) ---
+    future_hours = 8 
     future_time = [now + timedelta(hours=i) for i in range(1, future_hours + 1)]
     future_vals = []
     upper_bound = []
@@ -309,6 +305,8 @@ def generate_full_trend(current_val):
             
         temp = max(10, temp + trend + noise)
         future_vals.append(temp)
+        
+        # 隨著時間拉長，信賴區間 (uncertainty) 稍微變寬一點點是合理的
         spread = (i + 1) * 3 
         upper_bound.append(temp + spread)
         lower_bound.append(max(0, temp - spread))
@@ -417,7 +415,7 @@ st.markdown("---")
 row2_col1, row2_col2 = st.columns([2, 1])
 
 with row2_col1:
-    st.subheader("📈 歷史 24 小時趨勢 + 未來 4 小時 AI 預測")
+    st.subheader("📈 歷史 24 小時趨勢 + 未來 8 小時 AI 預測")
     fig_trend = go.Figure()
     
     # 1. 信賴區間
