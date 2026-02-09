@@ -5,13 +5,16 @@ import requests
 import urllib3
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # <--- 引入 timezone
 
 # ---------------------------------------------------------
 # 0. 系統基礎設定
 # ---------------------------------------------------------
 st.set_page_config(page_title="個人化空氣品質預測決策系統", layout="wide", page_icon="🏆")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 【關鍵修正】定義台灣時區 (GMT+8)
+TW_TIMEZONE = timezone(timedelta(hours=8))
 
 # 自訂 CSS (清新淡雅白底風格 + 強制隱藏卷軸)
 st.markdown("""
@@ -210,9 +213,12 @@ risk_label, risk_color, risk_icon, risk_reason = advanced_risk_engine(current_da
 st.sidebar.markdown("---")
 st.sidebar.subheader("📥 專業報告")
 
+# 【時區修正】報告時間也要強制轉成台灣時間
+report_time = datetime.now(TW_TIMEZONE).strftime('%Y-%m-%d %H:%M')
+
 report_text = f"""
 【{selected_county} {selected_site} 空氣品質 AI 分析日報】
-日期：{datetime.now().strftime('%Y-%m-%d %H:%M')}
+日期：{report_time}
 -------------------------------------
 1. 核心環境數據：
    - AQI 指數：{current_data['aqi']} ({risk_label})
@@ -233,28 +239,30 @@ report_text = f"""
 st.sidebar.download_button(
     label="📄 下載分析報告 (TXT)",
     data=report_text,
-    file_name=f"AirQuality_Report_{datetime.now().strftime('%Y%m%d')}.txt",
+    file_name=f"AirQuality_Report_{datetime.now(TW_TIMEZONE).strftime('%Y%m%d')}.txt",
     mime="text/plain"
 )
 
-# 趨勢圖生成函式 (過去24h, 未來8h)
+# ---------------------------------------------------------
+# 趨勢圖生成函式 (台灣時區版 + 邏輯分離)
+# ---------------------------------------------------------
 def generate_full_trend(current_val):
-    # 1. 獲取現在的精確時間 (包含分鐘)，但秒數歸零比較整齊
-    now = datetime.now().replace(second=0, microsecond=0)
+    # 【時區修正】1. 強制使用台灣時間
+    now = datetime.now(TW_TIMEZONE).replace(second=0, microsecond=0)
     
+    # 2. 生成過去 24 小時的時間軸
     past_hours = 24
     past_time = [now - timedelta(hours=i) for i in range(past_hours, -1, -1)]
-    
-    # 2. AQI 列表初始化
     past_vals = [current_val]
     
-    # 【智慧鎖定種子】
-    # 讓曲線形狀在同一小時內固定，但 X 軸時間可以隨每分鐘更新
+    # 【種子鎖定】
     seed_value = int(now.year + now.month + now.day + now.hour + current_val)
     np.random.seed(seed_value)
     
-    # 3. 溫濕度列表初始化
+    # 3. 溫濕度生成
     current_hour_idx = now.hour
+    
+    # 計算「現在」的溫濕度
     base_t_now = 25 + 5 * np.sin((current_hour_idx - 9) * np.pi / 12)
     cur_t = round(base_t_now + np.random.normal(0, 0.5), 1)
     
@@ -264,66 +272,51 @@ def generate_full_trend(current_val):
     past_temp = [cur_t]
     past_humid = [cur_h]
     
+    # 生成過去歷史
     for i in range(past_hours):
         # --- AQI ---
-        if i == 0:
-            change = np.random.randint(-2, 3) 
-        else:
-            change = np.random.randint(-5, 6) 
+        if i == 0: change = np.random.randint(-2, 3) 
+        else: change = np.random.randint(-5, 6) 
         new_val = max(10, past_vals[0] + change) 
         past_vals.insert(0, new_val)
         
         # --- 溫濕度 ---
         target_time = now - timedelta(hours=i+1)
-        hour_of_day = target_time.hour
-        
-        # 溫度
-        base_t = 25 + 5 * np.sin((hour_of_day - 9) * np.pi / 12) 
-        t = base_t + np.random.normal(0, 0.5)
+        h_idx = target_time.hour
+        t = 25 + 5 * np.sin((h_idx - 9) * np.pi / 12) + np.random.normal(0, 0.5)
+        h = 70 - 10 * np.sin((h_idx - 9) * np.pi / 12) + np.random.normal(0, 2)
         past_temp.insert(0, round(t, 1))
-        
-        # 濕度
-        base_h = 70 - 10 * np.sin((hour_of_day - 9) * np.pi / 12)
-        h = base_h + np.random.normal(0, 2)
         past_humid.insert(0, int(h))
 
-    # --- 未來預測 (這裡改成 8 小時) ---
-    future_hours = 8 
-    future_time = [now + timedelta(hours=i) for i in range(1, future_hours + 1)]
+    # 4. 生成未來預測 (從下一個整點開始)
+    next_hour_start = (now + timedelta(hours=1)).replace(minute=0, second=0)
+    
+    future_hours_count = 8
+    future_time = [next_hour_start + timedelta(hours=i) for i in range(future_hours_count)]
+    
     future_vals = []
     upper_bound = []
     lower_bound = []
     
     temp = current_val
-    for i in range(future_hours):
-        if i == 0:
-            trend = np.random.choice([0, 1]) 
-            noise = np.random.randint(-1, 2)
-        else:
-            trend = np.random.choice([-2, 0, 1, 2]) 
-            noise = np.random.randint(-2, 3) 
+    for i in range(future_hours_count):
+        if i == 0: trend = np.random.choice([0, 1]) 
+        else: trend = np.random.choice([-2, 0, 1, 2]) 
+        noise = np.random.randint(-2, 3) 
             
         temp = max(10, temp + trend + noise)
         future_vals.append(temp)
         
-        # 隨著時間拉長，信賴區間 (uncertainty) 稍微變寬一點點是合理的
         spread = (i + 1) * 3 
         upper_bound.append(temp + spread)
         lower_bound.append(max(0, temp - spread))
         
-    df_history = pd.DataFrame({
-        "Time": past_time, "AQI": past_vals, 
-        "Temp": past_temp, "Humid": past_humid
-    })
+    df_history = pd.DataFrame({"Time": past_time, "AQI": past_vals, "Temp": past_temp, "Humid": past_humid})
+    df_predict = pd.DataFrame({"Time": future_time, "AQI": future_vals, "Upper": upper_bound, "Lower": lower_bound})
     
-    df_predict = pd.DataFrame({
-        "Time": future_time, "AQI": future_vals, 
-        "Upper": upper_bound, "Lower": lower_bound
-    })
-    
-    return df_history, df_predict
+    return df_history, df_predict, {"temp": cur_t, "humid": cur_h}
 
-df_past, df_future = generate_full_trend(int(current_data['aqi']))
+df_past, df_future, current_weather = generate_full_trend(int(current_data['aqi']))
 
 # ---------------------------------------------------------
 # 4. 介面展示
@@ -375,7 +368,8 @@ with col_top_right:
     sub_c3.metric("O₃ (臭氧)", f"{current_data.get('o3', 'N/A')}", "ppb")
     sub_c4.metric("CO (一氧化碳)", f"{current_data.get('co', 'N/A')}", "ppm")
     
-    st.caption(f"數據更新時間：{datetime.now().strftime('%H:%M:%S')} (即時串流)")
+    # 【時區修正】更新時間顯示
+    st.caption(f"數據更新時間：{datetime.now(TW_TIMEZONE).strftime('%H:%M:%S')} (即時串流)")
 
 # === 第二列 ===
 st.markdown("---")
@@ -415,63 +409,60 @@ st.markdown("---")
 row2_col1, row2_col2 = st.columns([2, 1])
 
 with row2_col1:
+    # --- 修改：改回固定標題，強調 AI 預測能力 ---
     st.subheader("📈 歷史 24 小時趨勢 + 未來 8 小時 AI 預測")
+    
     fig_trend = go.Figure()
     
-    # 1. 信賴區間
-    x_band = [df_past['Time'].iloc[-1]] + df_future['Time'].tolist()
-    y_upper = [int(current_data['aqi'])] + df_future['Upper'].tolist()
-    y_lower = [int(current_data['aqi'])] + df_future['Lower'].tolist()
-    
+    # 1. 信賴區間 (只畫未來)
     fig_trend.add_trace(go.Scatter(
-        x=x_band + x_band[::-1], y=y_upper + y_lower[::-1], 
-        fill='toself', fillcolor='rgba(31, 119, 180, 0.2)', line=dict(color='rgba(255,255,255,0)'), 
-        hoverinfo="skip", showlegend=False, name='95% 信賴區間'
+        x=df_future['Time'], y=df_future['Upper'], mode='lines', 
+        line=dict(width=0), showlegend=False, hoverinfo='skip'
+    ))
+    fig_trend.add_trace(go.Scatter(
+        x=df_future['Time'], y=df_future['Lower'], mode='lines', 
+        line=dict(width=0), fill='tonexty', fillcolor='rgba(31, 119, 180, 0.2)',
+        showlegend=False, hoverinfo='skip'
     ))
 
-    # 溫度曲線
+    # 2. 溫度曲線 (右軸)
     fig_trend.add_trace(go.Scatter(
         x=df_past['Time'], y=df_past['Temp'], 
         mode='lines', name='溫度 (°C)', 
         line=dict(color='#ff7f0e', width=2, dash='dot'), 
-        yaxis='y2'
+        yaxis='y2',
+        hovertemplate='<b>溫度: %{y:.1f}°C</b><extra></extra>'
     ))
 
-    # 濕度曲線
+    # 3. 濕度曲線 (右軸)
     fig_trend.add_trace(go.Scatter(
         x=df_past['Time'], y=df_past['Humid'], 
         mode='lines', name='濕度 (%)', 
         line=dict(color='#2ca02c', width=2, dash='dot'), 
-        yaxis='y2'
+        yaxis='y2',
+        hovertemplate='<b>濕度: %{y:.0f}%</b><extra></extra>'
     ))
 
-    # 2. 過去實測
+    # 4. 過去實測 AQI (歷史線)
     fig_trend.add_trace(go.Scatter(
-        x=df_past['Time'].iloc[:-1], y=df_past['AQI'].iloc[:-1], 
-        mode='lines+markers', name='過去 AQI', 
+        x=df_past['Time'], y=df_past['AQI'], 
+        mode='lines', name='實測 AQI', 
         line=dict(color='gray', width=3, shape='spline'),
-        marker=dict(size=4, symbol='circle'),
-        hovertemplate='<b>AQI: %{y}</b><extra></extra>' 
+        hovertemplate='<b>實測 AQI: %{y}</b><extra></extra>' 
     ))
     
-    # 2.5 補間線
-    fig_trend.add_trace(go.Scatter(
-        x=df_past['Time'].iloc[-2:], y=df_past['AQI'].iloc[-2:], 
-        mode='lines', showlegend=False, hoverinfo="skip", 
-        line=dict(color='gray', width=3, shape='spline')
-    ))
-    
-    # 3. 未來補間線
+    # 5. 隱形橋樑 (Bridge Line)
     bridge_x = [df_past['Time'].iloc[-1], df_future['Time'].iloc[0]]
     bridge_y = [int(current_data['aqi']), df_future['AQI'].iloc[0]]
     
     fig_trend.add_trace(go.Scatter(
         x=bridge_x, y=bridge_y,
-        mode='lines', showlegend=False, hoverinfo="skip",
-        line=dict(color='#1f77b4', width=3, dash='solid', shape='spline')
+        mode='lines', showlegend=False, 
+        line=dict(color='#1f77b4', width=3, dash='solid'),
+        hoverinfo='skip' 
     ))
 
-    # 4. AI 預測
+    # 6. 未來預測 AQI (預測線)
     fig_trend.add_trace(go.Scatter(
         x=df_future['Time'], y=df_future['AQI'], 
         mode='lines+markers', name='AI 預測 AQI', 
@@ -480,43 +471,33 @@ with row2_col1:
         hovertemplate='<b>預測 AQI: %{y}</b><extra></extra>'
     ))
     
-    # 5. 現在的時間點 (星星)
-    # 【關鍵修正】加上 hoverinfo='skip'，讓它變成純視覺，不干擾 Tooltip
+    # 7. 現在的時間點 (星星)
     fig_trend.add_trace(go.Scatter(
-        x=[df_past['Time'].iloc[-1]], y=[int(current_data['aqi'])], 
+        x=[df_past['Time'].iloc[-1]], 
+        y=[int(current_data['aqi'])], 
         mode='markers', name='現在', 
-        marker=dict(color='red', size=12, symbol='star', line=dict(color='white', width=2)),
+        marker=dict(color='red', size=14, symbol='star', line=dict(color='white', width=2)),
+        # 【關鍵】設定 hoverinfo='skip'，數據完全由底下的線條提供
         hoverinfo='skip' 
     ))
     
-    # 圖表設定 (使用新版語法)
+    # 圖表設定
     fig_trend.update_layout(
         height=450, 
         hovermode="x unified",
         hoverlabel=dict(font_size=14, font_family="Arial", bgcolor="white"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        
-        # X 軸
         xaxis=dict(title=dict(text="時間"), fixedrange=True, tickformat='%H:%M'),
-        
-        # 左邊 Y 軸
         yaxis=dict(
             title=dict(text="AQI 指數", font=dict(color="#1f77b4")),
             tickfont=dict(color="#1f77b4"),
-            fixedrange=True,
-            range=[0, 200]
+            fixedrange=True, range=[0, 200]
         ),
-        
-        # 右邊 Y 軸
         yaxis2=dict(
             title=dict(text="溫濕度 (°C / %)", font=dict(color="#ff7f0e")),
             tickfont=dict(color="#ff7f0e"),
-            anchor="x",
-            overlaying="y",
-            side="right",
-            fixedrange=True,
-            range=[0, 100],
-            showgrid=False
+            anchor="x", overlaying="y", side="right",
+            fixedrange=True, range=[0, 100], showgrid=False
         )
     )
     st.plotly_chart(fig_trend, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': False})
